@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     // running `zig build`).
     // b.installArtifact(lib);
 
-    _ = b.addModule("comptime_clap", .{
+    _ = b.addModule("comptime-clap", .{
         .root_source_file = b.path("src/comptime_clap.zig"),
         .target = target,
         .optimize = optimize,
