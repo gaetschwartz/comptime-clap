@@ -34,6 +34,29 @@ pub const ArgumentIteratorArg = union(enum) {
         }
     }
 
+    pub const DisplayOpts = struct {
+        surround: ?u8,
+    };
+    pub fn Display(comptime opts: DisplayOpts) type {
+        return struct {
+            data: ArgumentIteratorArg,
+
+            pub fn format(v: @This(), _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+                if (opts.surround) |s| try writer.writeByte(s);
+                switch (v.data) {
+                    .kv => |kv| try writer.print("{s}={s}", .{ kv.key, kv.value }),
+                    .long => |e| try writer.print("--{s}", .{e}),
+                    .short => |e| try writer.print("-{s}", .{e}),
+                    .value => |e| try writer.print("{s}", .{e}),
+                }
+                if (opts.surround) |s| try writer.writeByte(s);
+            }
+        };
+    }
+    pub fn displayQuoted(self: ArgumentIteratorArg) Display(.{ .surround = '"' }) {
+        return .{ .data = self };
+    }
+
     pub fn eql(a: ArgumentIteratorArg, b: ArgumentIteratorArg) bool {
         return switch (a) {
             .kv => switch (b) {

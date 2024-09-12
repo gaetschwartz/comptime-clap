@@ -46,6 +46,7 @@ const JIT = struct {
     float: f32 = 0.0,
     @"0": []const u8,
     file: []const u8 = "output",
+    name: []const u8,
 
     pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
         _ = opts;
@@ -67,6 +68,7 @@ const App = struct {
 
 pub fn main() !void {
     const log = std.log.scoped(.main);
+    _ = log; // autofix
 
     var gpa = config.gpa();
     defer _ = gpa.deinit();
@@ -86,11 +88,11 @@ pub fn main() !void {
     }
     if (parsed.parsed.command) |c| {
         switch (c) {
-            .repl => |o| log.info("Repl with args: {}\n", .{o}),
-            .eval => |o| log.info("Eval with args: {}\n", .{o}),
-            .compile => |o| log.info("Compile with args: {}\n", .{o}),
-            .jit => |o| log.info("JIT with args: {}\n", .{o}),
-            .crazy => |o| log.info("Crazy with args: {}\n", .{o}),
+            .repl => |o| std.debug.print("Repl with args: {}\n", .{o}),
+            .eval => |o| std.debug.print("Eval with args: {}\n", .{o}),
+            .compile => |o| std.debug.print("Compile with args: {}\n", .{o}),
+            .jit => |o| std.debug.print("JIT with args: {}\n", .{o}),
+            .crazy => |o| std.debug.print("Crazy with args: {}\n", .{o}),
         }
     }
 }

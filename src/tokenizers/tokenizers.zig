@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const utils = @import("../utils/utils.zig");
 
 pub usingnamespace @import("general_purpose_tokenizer.zig");
 
@@ -467,102 +468,6 @@ pub fn fieldOfName(comptime T: type, comptime name: []const u8) ?switch (@typeIn
     return null;
 }
 
-pub fn FieldSet(comptime T: type, comptime V: type) type {
-    const FieldsSet = if (V == bool) struct {
-        const Self = @This();
-        set: Set,
-
-        const Set = std.bit_set.ArrayBitSet(usize, std.meta.fields(T).len);
-        pub fn init(defaultValue: V) Self {
-            if (defaultValue) {
-                return .{ .set = Set.initFull() };
-            } else {
-                return .{ .set = Set.initEmpty() };
-            }
-        }
-
-        pub fn setAt(self: *Self, index: usize, value: bool) void {
-            self.set.setValue(index, value);
-        }
-
-        pub fn getAt(self: *Self, index: usize) V {
-            return self.set.isSet(index);
-        }
-    } else struct {
-        const Self = @This();
-        fields_set: [std.meta.fields(T).len]V,
-
-        pub const fieldNames = std.meta.fieldNames(T);
-
-        pub const Error = error{
-            fieldNotFound,
-            OutOfBounds,
-        };
-
-        pub fn init(defaultValue: V) Self {
-            var s: [std.meta.fields(T).len]V = undefined;
-            inline for (0..std.meta.fields(T).len) |i| {
-                s[i] = defaultValue;
-            }
-            return Self{
-                .fields_set = s,
-            };
-        }
-
-        pub fn setAt(self: *Self, index: usize, value: V) void {
-            self.fields_set[index] = value;
-        }
-
-        pub fn getAt(self: *Self, index: usize) V {
-            return self.fields_set[index];
-        }
-    };
-
-    return struct {
-        fields_set: FieldsSet,
-
-        const Self = @This();
-
-        pub const Error = error{
-            fieldNotFound,
-            OutOfBounds,
-        };
-
-        pub fn init(defaultValue: V) Self {
-            return Self{ .fields_set = FieldsSet.init(defaultValue) };
-        }
-
-        pub fn set(self: *Self, comptime field: []const u8, value: V) Error!void {
-            if (std.meta.fieldIndex(T, field)) |i| {
-                self.fields_set.setAt(i, value);
-            } else {
-                return Error.fieldNotFound;
-            }
-        }
-
-        pub fn setAt(self: *Self, index: usize, value: V) Error!void {
-            if (index >= std.meta.fields(T).len) {
-                return Error.OutOfBounds;
-            }
-            self.fields_set.setAt(index, value);
-        }
-
-        pub fn get(self: *Self, field: []const u8) ?V {
-            if (std.meta.fieldIndex(T, field)) |i|
-                return self.fields_set.getAt(i)
-            else
-                return null;
-        }
-
-        pub fn getAt(self: *Self, index: usize) ?V {
-            if (index >= std.meta.fields(T).len) {
-                return null;
-            }
-            return self.fields_set.getAt(index);
-        }
-    };
-}
-
 pub fn StructFieldTracker(comptime T: type) type {
     const tpe_info = @typeInfo(T);
     const fields = tpe_info.Struct.fields;
@@ -572,28 +477,40 @@ pub fn StructFieldTracker(comptime T: type) type {
     }
     const map = std.StaticStringMap(comptime_int).initComptime(arr);
     return struct {
-        field_set: Set,
+        missing: Set,
+        hasDefault: Set,
         inner: T,
 
         const Self = @This();
         const Set = std.bit_set.ArrayBitSet(usize, std.meta.fields(T).len);
+        const names = fieldNames(T);
 
         fn fieldIndex(comptime field_name: []const u8) ?comptime_int {
             return map.get(field_name);
         }
 
-        pub fn init(value: T) Self {
-            return Self{ .field_set = Set.initEmpty(), .inner = value };
+        pub fn initValue(value: anytype) Self {
+            var self = Self{
+                .missing = Set.initFull(),
+                .hasDefault = Set.initEmpty(),
+                .inner = std.mem.zeroInit(T, value),
+            };
+            inline for (fields, 0..) |field, i| {
+                if (field.default_value) |_| {
+                    self.hasDefault.set(i);
+                }
+            }
+            return self;
         }
 
         pub fn zeroes() Self {
-            return Self{ .field_set = Set.initEmpty(), .inner = std.mem.zeroes(T) };
+            return initValue(.{});
         }
 
         pub fn set(self: *Self, comptime field_name: []const u8, value: anytype) void {
             @field(self.inner, field_name) = value;
             const index = fieldIndex(field_name) orelse @compileError("field '" ++ field_name ++ "' not found");
-            self.field_set.set(index);
+            self.missing.unset(index);
         }
 
         pub fn get(self: *Self, comptime field_name: []const u8) @TypeOf(@field(self.inner, field_name)) {
@@ -601,28 +518,47 @@ pub fn StructFieldTracker(comptime T: type) type {
         }
 
         pub fn isSet(self: *Self, comptime field_name: []const u8) bool {
-            const index = fieldIndex(field_name) orelse @compileError("field '" ++ field_name ++ "' not found");
-            return self.field_set.isSet(index);
+            return !self.isUnset(field_name);
         }
 
-        pub fn firstUnset(self: *Self) ?usize {
-            var iter = self.field_set.iterator(.{ .kind = .unset });
+        pub fn isUnset(self: *Self, comptime field_name: []const u8) bool {
+            const index = fieldIndex(field_name) orelse @compileError("field '" ++ field_name ++ "' not found");
+            return self.missing.isSet(index);
+        }
+
+        pub fn firstMissing(self: *Self) ?usize {
+            return self.missing.findFirstSet();
+        }
+
+        pub const FieldNotSetError = struct {
+            field_name: []const u8,
+        };
+        const R = utils.Result(T, FieldNotSetError);
+
+        pub fn checkAllSetOrSetDefault(self: *Self) R {
+            var iter = self.missing.iterator(.{ .kind = .set });
             while (iter.next()) |i| {
-                return i;
+                if (self.hasDefault.isSet(i)) {
+                    // this is ok
+                    continue;
+                } else {
+                    return R.err(.{ .field_name = names[i] });
+                }
             }
-            return null;
+
+            return R.success(self.inner);
         }
     };
 }
 
-test "StructFieldTracker" {
+test "StructFieldTracker set get isSet firstUnset" {
     comptime {
         const Foo = struct {
             x: i32,
             y: i32,
         };
 
-        var tracker = StructFieldTracker(Foo).init(Foo{ .x = 1, .y = 2 });
+        var tracker = StructFieldTracker(Foo).initValue(Foo{ .x = 1, .y = 2 });
 
         tracker.set("x", 42);
         try testing.expectEqual(42, tracker.get("x"));
@@ -632,7 +568,31 @@ test "StructFieldTracker" {
         try testing.expectEqual(43, tracker.get("y"));
         try testing.expect(tracker.isSet("y"));
 
-        try testing.expectEqual(null, tracker.firstUnset());
+        try testing.expectEqual(null, tracker.firstMissing());
+    }
+}
+
+const Foo2 = struct {
+    x: u8,
+    y: u16 = 42,
+};
+test "StructFieldTracker checkAllSetOrSetDefault" {
+    var tracker = StructFieldTracker(Foo2).zeroes();
+
+    tracker.set("x", 12);
+    try testing.expectEqual(12, tracker.get("x"));
+    try testing.expect(tracker.isSet("x"));
+    try testing.expect(tracker.isUnset("y"));
+    try testing.expectEqual(42, tracker.get("y"));
+
+    switch (tracker.checkAllSetOrSetDefault()) {
+        .Success => |s| {
+            try testing.expectEqual(12, tracker.get("x"));
+            try testing.expectEqual(42, tracker.get("y"));
+            try testing.expectEqual(12, s.x);
+            try testing.expectEqual(42, s.y);
+        },
+        .Error => return error.expectedSuccess,
     }
 }
 

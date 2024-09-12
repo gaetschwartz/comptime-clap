@@ -17,7 +17,7 @@ const ErrorType = union(enum) {
     FailedToParseValue: struct { option: []const u8, value: []const u8, err: ValueParsingError },
     UnexpectedFlag: struct { value: ArgumentIteratorArg },
     ExtraneousPositional: struct { value: ArgumentIteratorArg },
-    Parsing: struct { value: []const u8, err: IngesterError },
+    Parsing: struct { value: ArgumentIteratorArg, err: IngesterError },
 
     pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
         _ = opts;
@@ -26,12 +26,13 @@ const ErrorType = union(enum) {
             .ExpectedValue => |e| try writer.print("ExpectedValue{{option: {s}}}", .{e.option}),
             .RequiredOptionNotSet => |e| try writer.print("RequiredOptionNotSet{{option: {s}}}", .{e.option}),
             .FailedToParseValue => |e| try writer.print("FailedToParseValue{{option: {s}, value: {s}, err: {s}}}", .{ e.option, e.value, @errorName(e.err) }),
-            .UnexpectedFlag => |e| try writer.print("UnexpectedFlag{{value: {}}}", .{e.value}),
-            .ExtraneousPositional => |e| try writer.print("ExtraneousPositional{{value: {}}}", .{e.value}),
-            .Parsing => |e| try writer.print("Parsing{{value: {s}, err: {s}}}", .{ e.value, @errorName(e.err) }),
+            .UnexpectedFlag => |e| try writer.print("UnexpectedFlag{{value: {}}}", .{e.value.displayQuoted()}),
+            .ExtraneousPositional => |e| try writer.print("ExtraneousPositional{{value: {}}}", .{e.value.displayQuoted()}),
+            .Parsing => |e| try writer.print("Parsing{{value: {}, err: {s}}}", .{ e.value.displayQuoted(), @errorName(e.err) }),
         }
     }
 };
+
 const IngesterResult = Result(void, ErrorType);
 const IngesterError = error{
     expected_value,
@@ -72,9 +73,9 @@ fn formatError(err: ErrorType, writer: anytype) void {
         .ExpectedValue => |e| writer.print("Expected value for option: {s}\n", .{e.option}),
         .RequiredOptionNotSet => |e| writer.print("Required option not set: {s}\n", .{e.option}),
         .FailedToParseValue => |e| writer.print("Failed to parse value for option {s}: \"{s}\" ({s})\n", .{ e.option, e.value, @errorName(e.err) }),
-        .UnexpectedFlag => |e| writer.print("Unknown option: {}\n", .{e.value}),
-        .ExtraneousPositional => |e| writer.print("Extraneous positional argument: \"{}\"\n", .{e.value}),
-        .Parsing => |e| writer.print("Error {s} while parsing {s}\n", .{ @errorName(e.err), e.value }),
+        .UnexpectedFlag => |e| writer.print("Unknown option: {}\n", .{e.value.displayQuoted()}),
+        .ExtraneousPositional => |e| writer.print("Extraneous positional argument: \"{}\"\n", .{e.value.displayQuoted()}),
+        .Parsing => |e| writer.print("Error {s} while parsing {}\n", .{ @errorName(e.err), e.value.displayQuoted() }),
     }) catch @panic("Failed to format error");
 }
 
@@ -171,7 +172,7 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                 if (argsMap.get(key)) |res| {
                     log.debug("Found option: {s}", .{key});
                     const result = res.ingester(iter, &args, arg) catch |e|
-                        return .{ .Error = .{ .Parsing = .{ .value = arg.asStr(), .err = e } } };
+                        return .{ .Error = .{ .Parsing = .{ .value = arg, .err = e } } };
                     switch (result) {
                         .Success => {},
                         .Error => |e| return .{ .Error = e },
@@ -193,7 +194,11 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                 }
             }
 
-            return .{ .Success = args.inner };
+            log.debug("Current args: {}", .{args.inner});
+            return switch (args.checkAllSetOrSetDefault()) {
+                .Success => |r| .{ .Success = r },
+                .Error => |e| .{ .Error = .{ .RequiredOptionNotSet = .{ .option = e.field_name } } },
+            };
         }
 
         pub fn unwrapWithError(res: ParsingResult) Parsed {
@@ -287,6 +292,7 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                                     else => if (try iter.next()) |n| n.asStr() else return IngesterError.expected_value,
                                 },
                             };
+                            l.debug("Set field {s} to {any}", .{ field.name, v });
                             out.set(field.name, v);
                         },
                         .Complex => {
