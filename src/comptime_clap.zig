@@ -5,21 +5,37 @@ const OneTokenTokenizer = @import("tokenizers/one_token.zig");
 const utils = @import("utils/utils.zig");
 const ansi = @import("utils/ansi.zig");
 const Result = utils.Result;
-pub const ArgumentIterator = tks.ArgumentIterator;
+const argsType = @import("tokenizers/args.zig");
+pub const ArgumentIterator = argsType.ArgumentIterator(.{});
+const ArgumentIteratorArg = argsType.ArgumentIteratorArg;
 const config = @import("config.zig");
+const plog = utils.prefixed_log;
 
 const ErrorType = union(enum) {
     ExpectedValue: struct { option: []const u8 },
     RequiredOptionNotSet: struct { option: []const u8 },
     FailedToParseValue: struct { option: []const u8, value: []const u8, err: ValueParsingError },
-    UnexpectedFlag: struct { value: []const u8 },
-    ExtraneousPositional: struct { value: []const u8 },
+    UnexpectedFlag: struct { value: ArgumentIteratorArg },
+    ExtraneousPositional: struct { value: ArgumentIteratorArg },
     Parsing: struct { value: []const u8, err: IngesterError },
+
+    pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
+        _ = opts;
+        _ = fmt;
+        switch (v) {
+            .ExpectedValue => |e| try writer.print("ExpectedValue{{option: {s}}}", .{e.option}),
+            .RequiredOptionNotSet => |e| try writer.print("RequiredOptionNotSet{{option: {s}}}", .{e.option}),
+            .FailedToParseValue => |e| try writer.print("FailedToParseValue{{option: {s}, value: {s}, err: {s}}}", .{ e.option, e.value, @errorName(e.err) }),
+            .UnexpectedFlag => |e| try writer.print("UnexpectedFlag{{value: {}}}", .{e.value}),
+            .ExtraneousPositional => |e| try writer.print("ExtraneousPositional{{value: {}}}", .{e.value}),
+            .Parsing => |e| try writer.print("Parsing{{value: {s}, err: {s}}}", .{ e.value, @errorName(e.err) }),
+        }
+    }
 };
 const IngesterResult = Result(void, ErrorType);
 const IngesterError = error{
     expected_value,
-} || ValueParsingError || tks.ArgumentIterator.Error;
+} || ValueParsingError || ArgumentIterator.Error;
 
 const CommandPath = []const u8;
 
@@ -56,9 +72,9 @@ fn formatError(err: ErrorType, writer: anytype) void {
         .ExpectedValue => |e| writer.print("Expected value for option: {s}\n", .{e.option}),
         .RequiredOptionNotSet => |e| writer.print("Required option not set: {s}\n", .{e.option}),
         .FailedToParseValue => |e| writer.print("Failed to parse value for option {s}: \"{s}\" ({s})\n", .{ e.option, e.value, @errorName(e.err) }),
-        .UnexpectedFlag => |e| writer.print("Unknown option: \"{s}\"\n", .{e.value}),
-        .Parsing => |e| writer.print("Error {s} while parsing \"{s}\"\n", .{ @errorName(e.err), e.value }),
-        .ExtraneousPositional => |e| writer.print("Extraneous positional argument: \"{s}\"\n", .{e.value}),
+        .UnexpectedFlag => |e| writer.print("Unknown option: {}\n", .{e.value}),
+        .ExtraneousPositional => |e| writer.print("Extraneous positional argument: \"{}\"\n", .{e.value}),
+        .Parsing => |e| writer.print("Error {s} while parsing {s}\n", .{ @errorName(e.err), e.value }),
     }) catch @panic("Failed to format error");
 }
 
@@ -89,7 +105,7 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
     return struct {
         const Self = @This();
 
-        const log = tks.prefixed_log("[ArgParser:" ++ @typeName(A) ++ "] ");
+        const log = plog("[ArgParser:" ++ @typeName(A) ++ "] ");
 
         pub const options = opts;
         pub const Args = A;
@@ -128,7 +144,7 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                 try list.append(arg);
             }
             log.debug("Parsing arguments: {s}", .{list.items});
-            var iter = ArgumentIterator.init(list.items);
+            var iter = ArgumentIterator.init(alloc, list.items);
 
             const res = Self.parseFrom(&iter) catch |err| {
                 std.log.err("Unable to parse arguments: {s}\n", .{@errorName(err)});
@@ -150,28 +166,30 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
 
             while (try iter.next()) |arg| {
                 log.debug("Parsing argument: {s}", .{arg});
-                if (argsMap.get(arg.value)) |res| {
-                    const result = res.ingester(iter, &args, arg.value) catch |e|
-                        return .{ .Error = .{ .Parsing = .{ .value = arg.value, .err = e } } };
+                const key = arg.asStr();
+                log.debug("Looking for option '{s}' in map", .{key});
+                if (argsMap.get(key)) |res| {
+                    log.debug("Found option: {s}", .{key});
+                    const result = res.ingester(iter, &args, arg) catch |e|
+                        return .{ .Error = .{ .Parsing = .{ .value = arg.asStr(), .err = e } } };
                     switch (result) {
                         .Success => {},
                         .Error => |e| return .{ .Error = e },
                     }
                 } else {
-                    if (arg.value[0] == '-') {
-                        return .{ .Error = .{ .UnexpectedFlag = .{ .value = arg.value } } };
-                    } else {
-                        log.debug("Parsing positional argument: {s} ({d}/{d})", .{ arg.value, 1 + positional, positionals.len });
-                        if (!opts.allow_extraneous_positionals and positional >= positionals.len) {
-                            return .{ .Error = .{ .ExtraneousPositional = .{ .value = arg.value } } };
-                        }
-                        inline for (positionals, 0..) |p, i| {
-                            if (i == positional) {
-                                args.set(p, arg.value);
-                            }
-                        }
-                        positional += 1;
+                    if (arg == .long or arg == .short or arg == .kv) {
+                        return .{ .Error = .{ .UnexpectedFlag = .{ .value = arg } } };
                     }
+                    log.debug("Parsing positional argument: {s} ({d}/{d})", .{ key, 1 + positional, positionals.len });
+                    if (!opts.allow_extraneous_positionals and positional >= positionals.len) {
+                        return .{ .Error = .{ .ExtraneousPositional = .{ .value = arg } } };
+                    }
+                    inline for (positionals, 0..) |p, i| {
+                        if (i == positional) {
+                            args.set(p, arg.value);
+                        }
+                    }
+                    positional += 1;
                 }
             }
 
@@ -239,31 +257,42 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
             }
         }
 
-        const IngesterFn = fn (iter: *tks.ArgumentIterator, args: *tks.StructFieldTracker(A), arg: []const u8) IngesterError!IngesterResult;
+        const IngesterFn = fn (iter: *ArgumentIterator, args: *tks.StructFieldTracker(A), arg: ArgumentIterator.Arg) IngesterError!IngesterResult;
 
         const ArgsMapValue = struct { ingester: *const IngesterFn };
         const ArgsMap = std.StaticStringMap(*const ArgsMapValue);
         const ArgsMapInitKV = struct { []const u8, *const ArgsMapValue };
 
         fn Ingester(comptime field: std.builtin.Type.StructField) type {
+            const l = plog(std.fmt.comptimePrint("[{s}:{s}:ingester]", .{ path, field.name }));
             return struct {
                 pub const T = field.type;
 
-                pub fn miam(iter: *tks.ArgumentIterator, out: *tks.StructFieldTracker(A), arg: []const u8) IngesterError!IngesterResult {
-                    if (utils.AsSliceOfOpt(T, u8)) |asString| {
-                        const next = if (try iter.next()) |n|
-                            asString(n.value)
-                        else
-                            return IngesterError.expected_value;
-                        std.log.debug("Setting {s} to {s}", .{ field.name, next });
-                        out.set(field.name, next);
-                        return .Success;
-                    }
-                    switch (@typeInfo(T)) {
-                        .Struct => {
+                pub fn miam(iter: *ArgumentIterator, out: *tks.StructFieldTracker(A), arg: ArgumentIterator.Arg) IngesterError!IngesterResult {
+                    switch (utils.typing.getTyping(T).type) {
+                        .Literal => |lit| {
+                            const parser = defaultParse(T) orelse @compileError("Unsupported type");
+                            l.debug("Parsing primitive type: {s}", .{arg});
+                            const v = switch (lit) {
+                                .Int, .Float => switch (arg) {
+                                    .kv => |kv| try parser(kv.value),
+                                    else => try parser((try iter.next() orelse return error.expected_value).asStr()),
+                                },
+                                .Bool => switch (arg) {
+                                    .kv => |kv| try parser(kv.value),
+                                    else => true,
+                                },
+                                .String => switch (arg) {
+                                    .kv => arg.value,
+                                    else => if (try iter.next()) |n| n.asStr() else return IngesterError.expected_value,
+                                },
+                            };
+                            out.set(field.name, v);
+                        },
+                        .Complex => {
                             const parseFn = parseFnOf(T);
                             if (comptime MakeOptionConfig.maybeOf(T)) |o| {
-                                log.debug("Found option: {s} at field {s}", .{ arg, field.name });
+                                l.debug("Found option: {} at field {s}", .{ arg, field.name });
                                 if (o.cumulative) {
                                     const isSet = out.isSet(field.name);
                                     const curr = switch (@typeInfo(ValueType(T))) {
@@ -285,45 +314,29 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                                         @compileError("Type does not support accumulation");
                                     }
                                 } else {
-                                    const next = if (try iter.next()) |n|
-                                        n.value
-                                    else
-                                        return IngesterError.expected_value;
+                                    const next: []const u8 = switch (arg) {
+                                        .kv => |kv| kv.value,
+                                        else => blk: {
+                                            l.debug("Expecting value for option {s}", .{arg});
+                                            if (try iter.next()) |n| {
+                                                l.debug("Got value: {s}", .{n.asStr()});
+                                                break :blk n.asStr();
+                                            } else {
+                                                return IngesterError.expected_value;
+                                            }
+                                        },
+                                    };
                                     const value = try parseFn(next);
 
-                                    out.set(field.name, T{ .value = value });
+                                    out.set(field.name, value);
 
-                                    log.debug("Set option {s} to {s}", .{ o.name(), value });
+                                    l.debug("Set option {s} to {}", .{ o.name(), value });
                                 }
                             } else {
                                 @compileError("Invalid flag, it must either be a primitive type or a field of type Flag(...)");
                             }
                         },
-                        .Float, .Int, .Bool => {
-                            log.debug("Parsing primitive type: {s}", .{arg});
-                            const v = try PrimitiveHandler(T).handle(iter);
-                            out.set(field.name, v);
-                        },
-                        .Optional => |o| {
-                            switch (@typeInfo(o.child)) {
-                                .Union => |u| {
-                                    const Handler = CommandHandler(field, o.child, u);
-                                    const res = try Handler.miam(iter, out, field.name);
-                                    return res;
-                                },
-                                .Double, .Int, .Bool => {
-                                    const v = try PrimitiveHandler(o.child).handle(iter);
-                                    out.set(field.name, v);
-                                },
-                                else => @compileError("Type '" ++ @typeName(o.child) ++ "' is not supported yet"),
-                            }
-                        },
-                        .Union => |u| {
-                            const Handler = CommandHandler(field, T, u);
-                            const res = try Handler.miam(iter, out, field.name);
-                            return res;
-                        },
-                        else => @compileError("Type '" ++ @typeName(T) ++ "' is not supported yet"),
+                        .Unsupported => @compileError("Unsupported type"),
                     }
                     return .Success;
                 }
@@ -331,12 +344,12 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
         }
 
         const argsMap = blk: {
-            var array: [argsMapSize(A)]ArgsMapInitKV = undefined;
+            var array: [maxArgsMapSize(A)]ArgsMapInitKV = undefined;
             var i = 0;
 
             for (tpe_info.Struct.fields) |field| {
                 if (std.mem.eql(u8, commandFieldKey, field.name)) {
-                    if (asOptionalUnion(field.type)) |u| {
+                    if (utils.typing.asOptionalUnion(field.type)) |u| {
                         for (u.@"union".fields) |f| {
                             const value = &ArgsMapValue{ .ingester = &CommandHandler(u, f.name).miam };
 
@@ -346,28 +359,30 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                         continue;
                     }
                 }
-                if (utils.AsSliceOfOpt(field.type, u8)) |_| {
+                if (utils.typing.AsSliceOfOpt(field.type, u8)) |_| {
                     array[i] = .{ field.name, &ArgsMapValue{ .ingester = &Ingester(field).miam } };
                     i += 1;
                     continue;
                 }
+                if (isComplexType(field.type)) {
+                    const maybeOpts = MakeOptionConfig.maybeOf(field.type);
+                    const value = &ArgsMapValue{ .ingester = &Ingester(field).miam };
 
-                switch (@typeInfo(field.type)) {
-                    .Struct => {
-                        const maybeOpts = MakeOptionConfig.maybeOf(field.type);
-                        const value = &ArgsMapValue{ .ingester = &Ingester(field).miam };
-
-                        if (maybeOpts) |o| {
-                            if (o.long) |long| {
-                                array[i] = .{ long, value };
-                                i += 1;
-                            }
-                            if (o.short) |short| {
-                                array[i] = .{ &[_]u8{short}, value };
-                                i += 1;
-                            }
+                    if (maybeOpts) |o| {
+                        if (o.long) |long| {
+                            array[i] = .{ long, value };
+                            i += 1;
                         }
-                    },
+                        if (o.short) |short| {
+                            array[i] = .{ &[_]u8{short}, value };
+                            i += 1;
+                        }
+                        continue;
+                    } else {
+                        @compileError("Type " ++ @typeName(field.type) ++ " does not have a parse function");
+                    }
+                }
+                switch (@typeInfo(field.type)) {
                     .Float, .Int, .Bool => {
                         const value = &ArgsMapValue{ .ingester = &Ingester(field).miam };
                         array[i] = .{ field.name, value };
@@ -377,7 +392,6 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                             i += 1;
                         }
                     },
-
                     else => continue,
                 }
             }
@@ -385,12 +399,12 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
             break :blk ArgsMap.initComptime(array[0..i]);
         };
 
-        fn CommandHandler(comptime U: OptionUnion, comptime command: []const u8) type {
+        fn CommandHandler(comptime U: utils.typing.OptionUnion, comptime command: []const u8) type {
             return struct {
                 pub const T = U.tpe;
 
-                const l = tks.prefixed_log(std.fmt.comptimePrint("[{s}:commands]", .{path}));
-                pub fn miam(iter: *tks.ArgumentIterator, out: *tks.StructFieldTracker(A), _: []const u8) IngesterError!IngesterResult {
+                const l = plog(std.fmt.comptimePrint("[{s}:commands]", .{path}));
+                pub fn miam(iter: *ArgumentIterator, out: *tks.StructFieldTracker(A), _: ArgumentIterator.Arg) IngesterError!IngesterResult {
                     const Payload: type = std.meta.TagPayloadByName(T, command);
 
                     l.debug("CommandHandler: {s}", .{command});
@@ -409,11 +423,11 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
     };
 }
 
-fn argsMapSize(comptime T: type) usize {
+fn maxArgsMapSize(comptime T: type) usize {
     var size = 0;
     const tpe_info = @typeInfo(T);
     for (tpe_info.Struct.fields) |field| {
-        if (asOptionalUnion(field.type)) |u| {
+        if (utils.typing.asOptionalUnion(field.type)) |u| {
             for (u.@"union".fields) |_| {
                 size += 1;
             }
@@ -422,40 +436,6 @@ fn argsMapSize(comptime T: type) usize {
         }
     }
     return size;
-}
-
-pub fn PrimitiveHandler(comptime T: type) type {
-    return struct {
-        pub fn handle(iter: *tks.ArgumentIterator) IngesterError!T {
-            const parser = defaultParse(T);
-
-            switch (@typeInfo(T)) {
-                .Int, .Float => {
-                    if (try iter.peek()) |p| {
-                        const val = try parser(p.value);
-                        _ = try iter.next();
-                        return val;
-                    } else {
-                        return IngesterError.expected_value;
-                    }
-                },
-                .Bool => {
-                    if (try iter.peek()) |p| {
-                        std.log.debug("Parsing bool value: {s}", .{p.value});
-                        if (p.value.tag != .Key) {
-                            const val = try parser(p.consume());
-                            return val;
-                        } else {
-                            return true;
-                        }
-                    } else {
-                        return true;
-                    }
-                },
-                else => @compileError("Unsupported type"),
-            }
-        }
-    };
 }
 
 pub const ValueParsingError = error{
@@ -473,80 +453,98 @@ fn ValueType(comptime T: type) type {
     @compileError("Type " ++ @typeName(T) ++ " does not have a field named 'value'");
 }
 fn ParseFn(comptime T: type) type {
-    return fn ([]const u8) ValueParsingError!T;
+    return fn (value: []const u8) ValueParsingError!T;
 }
 fn TypeOfParseFnOf(comptime T: type) type {
     return ParseFn(ValueType(T));
 }
-fn parseFnOf(comptime T: type) TypeOfParseFnOf(T) {
-    if (!@hasDecl(T, "parse")) {
-        return defaultParse(@TypeOf(@field(T, "value")));
+fn parseFnOf(comptime T: type) ParseFn(T) {
+    if (@hasDecl(T, "parse")) {
+        const parseFn = @field(T, "parse");
+        if (@TypeOf(parseFn) != ParseFn(T)) {
+            @compileError("Invalid parse function, expected a function with signature : \n`" ++ @typeName(ParseFn(T)) ++ "` but got \n`" ++ @typeName(@TypeOf(parseFn)) ++ "`");
+        }
+        return @as(ParseFn(T), parseFn);
     }
-    const parseFn = @field(T, "parse");
-    if (@TypeOf(parseFn) != TypeOfParseFnOf(T)) {
-        @compileError("Invalid parse function");
-    }
-    return @as(TypeOfParseFnOf(T), parseFn);
+    @compileError("Type " ++ @typeName(T) ++ " does not have a parse function");
 }
-fn selfParseFn(comptime T: type) ?ParseFn(T) {
+
+fn canBeCustomData(comptime T: type) type {
     switch (@typeInfo(T)) {
         .Struct, .Union, .Opaque, .Enum => {
             if (@hasDecl(T, "parse")) {
                 const field = @field(T, "parse");
-                if (@TypeOf(field) == ParseFn(T)) {
-                    return @as(ParseFn(T), field);
-                } else {
-                    return null;
+                if (@TypeOf(field) != ParseFn(T)) {
+                    @compileError("Invalid parse function, expected a function with signature `" ++ @typeName(ParseFn(T)) ++ "`");
                 }
             } else {
-                return null;
+                @compileError("Type " ++ @typeName(T) ++ " does not have a parse function");
             }
+
+            var found = false;
+            inline for (std.meta.fields(T)) |f| {
+                if (std.mem.eql(u8, f.name, "value")) {
+                    if (@typeInfo(f.type) == .Optional) {
+                        found = true;
+                        break;
+                    } else {
+                        @compileError("Field 'value' must be of type 'Option' but got '" ++ @typeName(f.type) ++ "'");
+                    }
+                }
+            }
+
+            if (!found) {
+                @compileError("Type " ++ @typeName(T) ++ " does not have a field named 'value'");
+            }
+
+            return T;
         },
-        else => return null,
+        else => @compileError(@typeName(T) ++ " is not supported"),
     }
 }
-fn defaultParse(comptime T: type) ParseFn(T) {
-    switch (@typeInfo(T)) {
-        .Int => return struct {
+fn defaultParse(comptime T: type) ?ParseFn(T) {
+    return switch (@typeInfo(T)) {
+        .Int => struct {
             pub fn parse(s: []const u8) !T {
                 return std.fmt.parseInt(T, s, 10) catch
                     return error.invalid_int;
             }
         }.parse,
-        .Float => return struct {
+        .Float => struct {
             pub fn parse(s: []const u8) !T {
-                return std.fmt.parseFloat(s) catch
+                return std.fmt.parseFloat(T, s) catch
                     return error.invalid_float;
             }
         }.parse,
-        .Pointer => |pi| {
-            switch (pi.size) {
-                .One => return defaultParse(pi.child),
-                .Slice => if (pi.child == u8) {
-                    return struct {
-                        pub fn parse(s: []const u8) !T {
-                            return s;
-                        }
-                    }.parse;
-                } else @compileError("Unsupported type: " ++ @typeName(T)),
-                else => @compileError("Unsupported type: " ++ @typeName(T)),
+        .Bool => struct {
+            fn parse(s: []const u8) !bool {
+                if (s.len == 0) return false;
+                const BoolRepr = enum { @"0", @"1", false, true, f, t };
+                return if (std.meta.stringToEnum(BoolRepr, s)) |p| switch (p) {
+                    .@"0", .false, .f => false,
+                    .@"1", .true, .t => true,
+                } else error.invalid_bool;
             }
+        }.parse,
+        .Pointer => |pi| switch (pi.size) {
+            .One => defaultParse(pi.child),
+            .Slice => if (pi.child == u8)
+                struct {
+                    pub fn parse(s: []const u8) !T {
+                        return s;
+                    }
+                }.parse
+            else
+                return null,
+            else => return null,
         },
-        .Bool => return parseBool,
-        .Optional => |o| return defaultParse(o.child),
-        else => @compileError("Type '" ++ @typeName(T) ++ "' doesn't have a default parser"),
-    }
+        .Optional => |o| defaultParse(o.child),
+        else => null,
+    };
 }
-fn parseBool(s: []const u8) !bool {
-    if (s.len == 0) return false;
-    const BoolRepr = enum { @"0", @"1", false, true, f, t };
-    return if (std.meta.stringToEnum(BoolRepr, s)) |p| switch (p) {
-        .@"0", .false, .f => false,
-        .@"1", .true, .t => true,
-    } else error.invalid_bool;
-}
+
 test "ParseBool" {
-    const parse = parseBool;
+    const parse = defaultParse(bool) orelse @compileError("No parse function for bool");
     try testing.expectEqual(false, parse("0"));
     try testing.expectEqual(true, parse("1"));
     try testing.expectEqual(false, parse("false"));
@@ -555,37 +553,47 @@ test "ParseBool" {
     try testing.expectEqual(true, parse("t"));
     try testing.expectError(ValueParsingError.invalid_bool, parse("2"));
 }
-fn MakeOption(comptime raw_options: anytype, comptime T: type) type {
-    const parsed = blk: {
+pub fn MakeOption(comptime raw_options: anytype, comptime T: type) type {
+    const parsedOptions = blk: {
         if (@TypeOf(raw_options) == MakeOptionConfig) {
             break :blk @as(MakeOptionConfig, raw_options);
         }
 
-        if (utils.asString(raw_options)) |s| {
+        if (utils.typing.asString(raw_options)) |s| {
             break :blk MakeOptionConfig.parse(s) catch |err| @compileError("Invalid options: " ++ @errorName(err));
         }
-    };
-    switch (@typeInfo(T)) {
-        .Bool, .Int => {},
-        else => if (parsed.cumulative) {
-            @compileError("Only bool and int types can be cumulative");
-        },
-    }
-    const parseFn: ParseFn(T) = if (selfParseFn(T)) |f| f else defaultParse(T);
 
-    if (parsed.short == null and parsed.long == null) {
+        @compileError("Invalid options type, expected a " ++ @typeName(MakeOptionConfig) ++ " or a string");
+    };
+    if (parsedOptions.cumulative and @typeInfo(T) != .Int and @typeInfo(T) != .Bool) {
+        @compileError("Only bool and int types can be cumulative");
+    }
+    if (parsedOptions.short == null and parsedOptions.long == null) {
         @compileError("Either short or long must be provided");
     }
 
-    return struct {
-        value: T,
+    if (defaultParse(T)) |p| {
+        return struct {
+            value: T,
 
-        pub fn parse(s: []const u8) ValueParsingError!T {
-            return try parseFn(s);
-        }
+            pub fn parse(s: []const u8) ValueParsingError!@This() {
+                return .{ .value = try p(s) };
+            }
 
-        pub const options = parsed;
-    };
+            pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
+                if (std.meta.hasMethod(T, "format")) {
+                    return v.value.format(fmt, opts, writer);
+                } else {
+                    // @compileLog(std.fmt.comptimePrint("No format method for type {s}, fmt: {s}", .{ @typeName(@This()), fmt }));
+                    return writer.print("{}", .{std.json.fmt(v.value, .{})});
+                }
+            }
+
+            pub const options = parsedOptions;
+        };
+    } else {
+        return canBeCustomData(T);
+    }
 }
 
 pub const FlagConfig = struct {
@@ -668,7 +676,7 @@ const MakeOptionConfig = struct {
     default: ?[]const u8,
     required: bool = false,
 
-    const Tokenizer = OneTokenTokenizer();
+    const Tokenizer = OneTokenTokenizer;
 
     pub fn name(self: MakeOptionConfig) []const u8 {
         return if (self.long) |l| l else &[_]u8{self.short.?};
@@ -751,16 +759,21 @@ const MakeOptionConfig = struct {
     pub const optsOptionsFieldName = "options";
 
     pub fn maybeOf(comptime T: type) ?MakeOptionConfig {
-        switch (@typeInfo(T)) {
-            .Struct, .Enum, .Union, .Opaque => {
-                if (@hasDecl(T, optsOptionsFieldName)) {
-                    const field = @field(T, optsOptionsFieldName);
-                    if (@TypeOf(field) == MakeOptionConfig) {
-                        return @as(MakeOptionConfig, field);
-                    }
+        if (isComplexType(T)) {
+            if (@hasDecl(T, optsOptionsFieldName)) {
+                const field = @field(T, optsOptionsFieldName);
+                if (@TypeOf(field) == MakeOptionConfig) {
+                    return @as(MakeOptionConfig, field);
                 }
-            },
-            else => {},
+            } else {
+                return MakeOptionConfig{
+                    .long = null,
+                    .short = null,
+                    .description = null,
+                    .cumulative = false,
+                    .default = null,
+                };
+            }
         }
         return null;
     }
@@ -782,6 +795,19 @@ const MakeOptionConfig = struct {
         return null;
     }
 };
+
+pub fn isComplexType(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .Struct, .Union, .Opaque, .Enum => true,
+        else => false,
+    };
+}
+pub fn isLiteralType(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .Int, .Float, .Bool => true,
+        else => false,
+    };
+}
 
 const o1 = "{h,help}[Print help message]+=false";
 const op1 = MakeOptionConfig{
@@ -860,25 +886,24 @@ test "ArgParser" {
         myUrl: MakeOption("{u,url}[URL to fetch data from]", []const u8),
         verbosity: MakeOption("{v,verbose}[Increase verbosity level]+=0", u32),
     };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
 
-    var iter = tks.ArgumentIterator.init(&[_][]const u8{ "-h", "-u", "https://example.com", "-v", "-v", "-v" });
-    const result = try ArgParser(Args).parseFrom(&iter);
+    var iter = ArgumentIterator.init(
+        arena.allocator(),
+        &.{ "-h", "-u", "https://example.com", "-v", "-v", "-v" },
+    );
+    const Parser = ArgParser(Args);
+    const result = try Parser.parseFrom(&iter);
+    if (result == .Error) {
+        std.debug.print("Error: {}\n", .{result.Error});
+        return error.UnexpectedError;
+    }
     const res = result.Success;
 
     try testing.expectEqual(true, res.showHelp.value);
     try testing.expectEqualStrings("https://example.com", res.myUrl.value);
     try testing.expectEqual(3, res.verbosity.value);
-}
-
-pub const OptionUnion = struct { tpe: type, @"union": std.builtin.Type.Union };
-pub fn asOptionalUnion(comptime T: type) ?OptionUnion {
-    return switch (@typeInfo(T)) {
-        .Optional => |o| switch (@typeInfo(o.child)) {
-            .Union => |u| .{ .tpe = o.child, .@"union" = u },
-            else => null,
-        },
-        else => null,
-    };
 }
 
 pub fn MultiArgsMap(comptime V: type) type {

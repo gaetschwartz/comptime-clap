@@ -1,9 +1,6 @@
 const std = @import("std");
-const gmml = @import("../../gmml.zig");
-const ast = gmml.ast;
-const lexer = gmml.Lexer;
 const tks = @import("tokenizers.zig");
-const compiler = gmml.compiler;
+const cfg = @import("../config.zig");
 
 pub const TokenizerOptions = struct {
     ignore: []const u8,
@@ -150,7 +147,10 @@ pub fn TokenizerFor(comptime ignore: anytype, comptime delimiters: anytype) type
 }
 
 test "tokenizer" {
-    var tokenizer = GeneralPurposeTokenizer(TokenizerOptions.forTypes(ast.Space, .{ ast.Delimiter, ast.Operator })).init("12  - (3) ");
+    const Delimiters = union(enum) { @"(", @")", @"{", @"}", @";", @"," };
+    const Spaces = union(enum) { @" ", @"\t", @"\n" };
+    const Operators = union(enum) { @"+", @"-", @"*", @"/" };
+    var tokenizer = GeneralPurposeTokenizer(TokenizerOptions.forTypes(Spaces, .{ Delimiters, Operators })).init("12  - (3) ");
     const array = try tokenizer.toArray(std.testing.allocator);
     defer std.testing.allocator.free(array);
 

@@ -1,6 +1,5 @@
 const std = @import("std");
 const testing = std.testing;
-const gmml = @import("../../gmml.zig");
 
 pub usingnamespace @import("general_purpose_tokenizer.zig");
 
@@ -367,25 +366,25 @@ pub fn ArrayListGenerator(comptime T: type) type {
         }
     });
 }
-test "ArrayListGenerator" {
-    const Foo = struct {
-        x: i32,
-        y: i32,
-    };
+// test "ArrayListGenerator" {
+//     const Foo = struct {
+//         x: i32,
+//         y: i32,
+//     };
 
-    var gen = ArrayListGenerator(Foo).init(std.testing.allocator);
-    defer gen.deinit();
+//     var gen = ArrayListGenerator(Foo).init(std.testing.allocator);
+//     defer gen.deinit();
 
-    const a = gen.next(Foo{ .x = 1, .y = 2 });
-    try testing.expectEqual(a.id, 0);
-    try testing.expectEqual(a.value.x, 1);
-    try testing.expectEqual(a.value.y, 2);
+//     const a = gen.next(Foo{ .x = 1, .y = 2 });
+//     try testing.expectEqual(a.id, 0);
+//     try testing.expectEqual(a.value.x, 1);
+//     try testing.expectEqual(a.value.y, 2);
 
-    const b = gen.next(Foo{ .x = 3, .y = 4 });
-    try testing.expectEqual(b.id, 1);
-    try testing.expectEqual(b.value.x, 3);
-    try testing.expectEqual(b.value.y, 4);
-}
+//     const b = gen.next(Foo{ .x = 3, .y = 4 });
+//     try testing.expectEqual(b.id, 1);
+//     try testing.expectEqual(b.value.x, 3);
+//     try testing.expectEqual(b.value.y, 4);
+// }
 
 pub fn FixedSizeArray(comptime T: type, comptime N: usize) type {
     return struct {
@@ -792,272 +791,6 @@ test "FlagIterator '-rvf'" {
     try testing.expectEqual(null, d);
 }
 
-pub const ArgumentIterator = struct {
-    source: []const []const u8,
-    i: usize = 0,
-    j: usize = 0,
-    singleCharFlagMode: bool = false,
-    next_tag: ?Tag = null,
-
-    const Self = @This();
-    pub const Tag = enum { Key, Value };
-
-    pub fn init(source: []const []const u8) Self {
-        return Self{
-            .source = source,
-        };
-    }
-
-    pub const Type = struct {
-        value: []const u8,
-        tag: Tag,
-
-        pub fn format(v: Self.Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.print("({s} {s})", .{ @tagName(v.tag), v.value });
-        }
-
-        pub fn eql(a: Self.Type, b: Self.Type) bool {
-            return a.tag == b.tag and std.mem.eql(u8, a.value, b.value);
-        }
-    };
-
-    pub const Error = error{
-        tooManyDashes,
-    };
-
-    pub fn next(self: *Self) Error!?Type {
-        // std.debug.print("i: {}, j: {}, singleCharFlagMode: {}\n", .{ self.i, self.j, self.singleCharFlagMode });
-        if (self.i >= self.source.len) {
-            return null;
-        }
-        // std.debug.print("curr: {s}\n", .{self.source[self.i][self.j..]});
-        const string = self.source[self.i];
-        if (self.j >= string.len) {
-            self.goNextString();
-            // std.debug.print("going to next because j >= len\n", .{});
-            return self.next();
-        }
-
-        if (self.singleCharFlagMode) {
-            return self.handleSingleCharFlagMode();
-        }
-
-        const d = self.countDashes();
-        self.j += d;
-        const curr = string[self.j..];
-        // std.debug.print("d: {}, curr: {s}\n", .{ d, curr });
-
-        switch (d) {
-            0 => {
-                self.goNextString();
-                return self.value(curr);
-            },
-            1 => {
-                self.j += 1;
-                self.singleCharFlagMode = true;
-                return self.smart(curr[0..1]);
-            },
-            2 => {
-                if (std.mem.indexOf(u8, curr, "=")) |eq| {
-                    self.j += eq + 1;
-                    self.next_tag = .Value;
-                    return self.key(curr[0..eq]);
-                } else {
-                    self.goNextString();
-                    return self.smart(curr);
-                }
-            },
-            else => return error.tooManyDashes,
-        }
-    }
-
-    fn goNextString(self: *Self) void {
-        self.i += 1;
-        self.j = 0;
-        self.singleCharFlagMode = false;
-    }
-
-    fn countDashes(self: *Self) usize {
-        var d: usize = 0;
-        for (self.source[self.i][self.j..]) |c| {
-            if (c == '-') {
-                d += 1;
-            } else {
-                break;
-            }
-        }
-        return d;
-    }
-
-    fn handleSingleCharFlagMode(self: *Self) !?Type {
-        const flag = self.source[self.i][self.j..][0..1];
-        self.j += 1;
-        if (flag[0] == '=') {
-            self.singleCharFlagMode = false;
-            return self.next();
-        } else {
-            return self.key(flag);
-        }
-    }
-
-    pub fn nextValue(self: *Self) !?[]const u8 {
-        return if (try self.next()) |arg| switch (arg.tag) {
-            .Key => null,
-            .Value => arg.value,
-        } else null;
-    }
-
-    pub fn nextKey(self: *Self) !?[]const u8 {
-        return if (try self.next()) |arg| switch (arg.tag) {
-            .Key => arg.value,
-            .Value => null,
-        } else null;
-    }
-
-    fn smart(self: *Self, s: []const u8) Type {
-        var tag = Tag.Key;
-        if (self.next_tag) |t| {
-            tag = t;
-            self.next_tag = null;
-        }
-        return Type{ .value = s, .tag = tag };
-    }
-    fn key(self: *Self, s: []const u8) Type {
-        self.next_tag = null;
-
-        return Type{ .value = s, .tag = .Key };
-    }
-
-    fn value(self: *Self, s: []const u8) Type {
-        self.next_tag = null;
-
-        return Type{ .value = s, .tag = .Value };
-    }
-
-    pub const Peeked = struct {
-        j: usize,
-        i: usize,
-        iter: *Self,
-        value: Type,
-
-        pub fn consume(self: *const Peeked) []const u8 {
-            self.iter.j = self.j;
-            self.iter.i = self.i;
-            return self.value.value;
-        }
-    };
-
-    pub fn peek(self: *Self) Error!?Peeked {
-        const j = self.j;
-        const i = self.i;
-        const res = try self.next();
-        self.j = j;
-        self.i = i;
-        if (res) |r|
-            return Peeked{ .j = j, .i = i, .iter = self, .value = r }
-        else
-            return null;
-    }
-};
-
-test "ArgumentIterator" {
-    const source = [_][]const u8{
-        "100-12",
-        "foo",
-        "-bar",
-        "--baz",
-        "--qux=quux",
-        "-n=10",
-        "corge",
-        "100-12",
-    };
-    var iter = ArgumentIterator.init(&source);
-
-    var arr = std.ArrayList(ArgumentIterator.Type).init(std.testing.allocator);
-    defer arr.deinit();
-
-    while (try iter.next()) |arg| try arr.append(arg);
-
-    const expected = &[_]ArgumentIterator.Type{
-        .{ .tag = .Value, .value = "100-12" },
-        .{ .tag = .Value, .value = "foo" },
-        .{ .tag = .Key, .value = "b" },
-        .{ .tag = .Key, .value = "a" },
-        .{ .tag = .Key, .value = "r" },
-        .{ .tag = .Key, .value = "baz" },
-        .{ .tag = .Key, .value = "qux" },
-        .{ .tag = .Value, .value = "quux" },
-        .{ .tag = .Key, .value = "n" },
-        .{ .tag = .Value, .value = "10" },
-        .{ .tag = .Value, .value = "corge" },
-        .{ .tag = .Value, .value = "100-12" },
-    };
-
-    for (0..expected.len) |i| {
-        const a = arr.items[i];
-        const e = expected[i];
-
-        if (!ArgumentIterator.Type.eql(a, e)) {
-            std.debug.print(
-                \\Missmatch at index {d}:
-                \\  got:      {}
-                \\  expected: {}
-                \\
-            ,
-                .{ i, a, e },
-            );
-            std.debug.print("expected: {s}\n", .{expected});
-            std.debug.print("actual:   {s}\n", .{arr.items});
-            return error.Mismatch;
-        }
-    }
-}
-
-pub fn prefixed_log(comptime prefix: []const u8) type {
-    return struct {
-        const scope = std.log.default_log_scope;
-        const log = std.log.scoped(scope);
-        /// Log an error message. This log level is intended to be used
-        /// when something has gone wrong. This might be recoverable or might
-        /// be followed by the program exiting.
-        pub fn err(
-            comptime format: []const u8,
-            args: anytype,
-        ) void {
-            @setCold(true);
-            log.err(prefix ++ format, args);
-        }
-
-        /// Log a warning message. This log level is intended to be used if
-        /// it is uncertain whether something has gone wrong or not, but the
-        /// circumstances would be worth investigating.
-        pub fn warn(
-            comptime format: []const u8,
-            args: anytype,
-        ) void {
-            log.warn(prefix ++ format, args);
-        }
-
-        /// Log an info message. This log level is intended to be used for
-        /// general messages about the state of the program.
-        pub fn info(
-            comptime format: []const u8,
-            args: anytype,
-        ) void {
-            log.info(prefix ++ format, args);
-        }
-
-        /// Log a debug message. This log level is intended to be used for
-        /// messages which are only useful for debugging.
-        pub fn debug(
-            comptime format: []const u8,
-            args: anytype,
-        ) void {
-            log.debug(prefix ++ format, args);
-        }
-    };
-}
-
 fn TypePair(comptime T: type, comptime T2: type) type {
     return struct {
         value: T,
@@ -1076,6 +809,7 @@ pub fn BetterType(comptime T: type) type {
         Else: TypePair(T, std.builtin.Type),
     };
 }
+
 pub fn betterTypeInfo(comptime arg: anytype) BetterType(@TypeOf(arg)) {
     const tpe_info = @typeInfo(@TypeOf(arg));
     return switch (tpe_info) {

@@ -1,6 +1,8 @@
 const std = @import("std");
 const config = @import("config.zig");
-const ArgParser = @import("comptime_parser.zig").ArgParserWithOpts;
+const ArgParser = @import("comptime_clap.zig").ArgParserWithOpts;
+const MakeOption = @import("comptime_clap.zig").MakeOption;
+const ValueParsingError = @import("comptime_clap.zig").ValueParsingError;
 
 const Repl = struct {
     verbose: bool = false,
@@ -15,11 +17,41 @@ const Compile = struct {
     @"0": []const u8,
 };
 
+const Crazy = struct {
+    // showHelp: MakeOption("{h,help}[Print help message]+=false", bool),
+    // myUrl: MakeOption("{u,url}[URL to fetch data from]", []const u8),
+    // verbosity: MakeOption("{v,verbose}[Increase verbosity level]+=0", u32),
+    complex: ComplexType,
+
+    pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
+        _ = opts;
+        _ = fmt;
+        // try writer.print("Crazy{{showHelp: {}, myUrl: {s}, verbosity: {}}}", .{ v.showHelp, v.myUrl, v.verbosity });
+        try writer.print("Crazy{{complex: {}}}", .{v.complex});
+    }
+};
+
+const ComplexType = struct {
+    value: u32,
+
+    pub fn parse(v: []const u8) ValueParsingError!ComplexType {
+        return .{ .value = std.fmt.parseInt(u32, v, 10) catch return error.invalid_int };
+    }
+};
+
 const JIT = struct {
     verbose: bool = false,
     json: bool = false,
+    int: u32 = 0,
+    float: f32 = 0.0,
     @"0": []const u8,
     file: []const u8 = "output",
+
+    pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
+        _ = opts;
+        _ = fmt;
+        try writer.print("Jit{}", .{std.json.Formatter(@This()){ .value = v, .options = .{} }});
+    }
 };
 
 const App = struct {
@@ -29,6 +61,7 @@ const App = struct {
         eval: Eval,
         compile: Compile,
         jit: JIT,
+        crazy: Crazy,
     },
 };
 
@@ -57,6 +90,7 @@ pub fn main() !void {
             .eval => |o| log.info("Eval with args: {}\n", .{o}),
             .compile => |o| log.info("Compile with args: {}\n", .{o}),
             .jit => |o| log.info("JIT with args: {}\n", .{o}),
+            .crazy => |o| log.info("Crazy with args: {}\n", .{o}),
         }
     }
 }

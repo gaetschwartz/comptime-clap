@@ -105,7 +105,7 @@ pub fn isEOF(self: *Self) bool {
 }
 
 test "OneTokenizer simple" {
-    const T = Self();
+    const T = Self;
     var tokenizer = T.init("{uwu}=:owo(awa)");
     try std.testing.expectEqualStrings("{", try tokenizer.take(1));
     try std.testing.expectEqualStrings("uwu", try tokenizer.peekUntil('}'));
@@ -117,7 +117,7 @@ test "OneTokenizer simple" {
 }
 
 test "OneTokenizer errors" {
-    const T = Self();
+    const T = Self;
     var tokenizer = T.init("abcdef");
     try std.testing.expectError(error.no_matching_char, tokenizer.readUntil('='));
     try std.testing.expectEqualStrings("abcdef", try tokenizer.rest());
