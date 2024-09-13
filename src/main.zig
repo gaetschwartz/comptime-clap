@@ -42,8 +42,8 @@ const ComplexType = struct {
 const JIT = struct {
     verbose: bool = false,
     json: bool = false,
-    int: u32 = 0,
-    float: f32 = 0.0,
+    my_int: u32 = 0,
+    my_float: f32 = 0.0,
     @"0": []const u8,
     file: []const u8 = "output",
     name: []const u8,
@@ -51,7 +51,7 @@ const JIT = struct {
     pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
         _ = opts;
         _ = fmt;
-        try writer.print("Jit{}", .{std.json.Formatter(@This()){ .value = v, .options = .{} }});
+        try writer.print("Jit{}", .{std.json.fmt(v, .{})});
     }
 };
 

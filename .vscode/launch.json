@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "(lldb) Launch",
+      "type": "cppdbg",
+      "request": "launch",
+      "MIMode": "lldb",
+      "program": "${workspaceFolder}/zig-out/bin/comptime-clap-main",
+      "args": [
+        "jit",
+        "--name",
+        "uwu",
+        "positional",
+        "--verbose",
+        "--file=myfile",
+        "--my_float=7.5",
+        "--my_int",
+        "42"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build",
+    }
+  ]
+}

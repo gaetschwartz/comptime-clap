@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "comptime-clap",
+        .name = "comptime-clap-main",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,

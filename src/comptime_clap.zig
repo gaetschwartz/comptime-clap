@@ -187,7 +187,7 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                     }
                     inline for (positionals, 0..) |p, i| {
                         if (i == positional) {
-                            args.set(p, arg.value);
+                            args.set(p, arg.asStr());
                         }
                     }
                     positional += 1;
@@ -288,7 +288,7 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                                     else => true,
                                 },
                                 .String => switch (arg) {
-                                    .kv => arg.value,
+                                    .kv => |kv| kv.value,
                                     else => if (try iter.next()) |n| n.asStr() else return IngesterError.expected_value,
                                 },
                             };
