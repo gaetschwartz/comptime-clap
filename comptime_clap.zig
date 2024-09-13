@@ -1,14 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
-const tks = @import("tokenizers/tokenizers.zig");
-const OneTokenTokenizer = @import("tokenizers/one_token.zig");
-const utils = @import("utils/utils.zig");
-const ansi = @import("utils/ansi.zig");
+const tks = @import("src/tokenizers/tokenizers.zig");
+const OneTokenTokenizer = @import("src/tokenizers/one_token.zig");
+const utils = @import("src/utils/utils.zig");
+const ansi = @import("src/utils/ansi.zig");
 const Result = utils.Result;
-const argsType = @import("tokenizers/args.zig");
+const argsType = @import("src/tokenizers/args.zig");
 pub const ArgumentIterator = argsType.ArgumentIterator(.{});
 const ArgumentIteratorArg = argsType.ArgumentIteratorArg;
-const config = @import("config.zig");
+const config = @import("src/config.zig");
 const plog = utils.prefixed_log;
 
 const ErrorType = union(enum) {

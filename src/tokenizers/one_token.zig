@@ -1,8 +1,4 @@
 const std = @import("std");
-const gmml = @import("../../gmml.zig");
-const ast = gmml.ast;
-const lexer = gmml.Lexer;
-const compiler = gmml.compiler;
 const tks = @import("tokenizers.zig");
 
 source: []const u8,

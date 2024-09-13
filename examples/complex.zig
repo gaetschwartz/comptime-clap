@@ -1,8 +1,8 @@
 const std = @import("std");
-const config = @import("config.zig");
-const ArgParser = @import("comptime_clap.zig").ArgParserWithOpts;
-const MakeOption = @import("comptime_clap.zig").MakeOption;
-const ValueParsingError = @import("comptime_clap.zig").ValueParsingError;
+const cclap = @import("comptime-clap");
+const ArgParser = cclap.ArgParserWithOpts;
+const MakeOption = cclap.MakeOption;
+const ValueParsingError = cclap.ValueParsingError;
 
 const Repl = struct {
     verbose: bool = false,
@@ -69,9 +69,9 @@ const App = struct {
 pub fn main() !void {
     const log = std.log.scoped(.main);
     _ = log; // autofix
-
-    var gpa = config.gpa();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
+
     const alloc = gpa.allocator();
 
     const Parser = ArgParser(App, .{});
