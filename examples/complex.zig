@@ -46,7 +46,7 @@ const JIT = struct {
     my_float: f32 = 0.0,
     @"0": []const u8,
     file: []const u8 = "output",
-    name: []const u8,
+    name: [8]u8,
 
     pub fn format(v: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void {
         _ = opts;
@@ -56,32 +56,28 @@ const JIT = struct {
 };
 
 const App = struct {
-    help: bool = false,
     command: ?union(enum) {
         repl: Repl,
         eval: Eval,
         compile: Compile,
         jit: JIT,
         crazy: Crazy,
-    },
+    } = null,
 };
 
 pub fn main() !void {
-    const log = std.log.scoped(.main);
-    _ = log; // autofix
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
     const alloc = gpa.allocator();
 
-    const Parser = ArgParser(App, .{});
+    const Parser = ArgParser(App, .{ .short_flags = cclap.ShortFlags.map(.{
+        .@"jit.my_int" = 'i',
+        .@"jit.my_float" = 'f',
+    }) });
     var parsed = try Parser.parse(.{ .allocator = alloc });
     defer parsed.deinit();
 
-    if (parsed.parsed.help) {
-        try Parser.printUsage();
-        std.process.exit(0);
-    }
     inline for (@typeInfo(App).Struct.fields) |field| {
         const val = @field(parsed.parsed, field.name);
         std.log.debug("{s} = {any}", .{ field.name, val });

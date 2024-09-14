@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const tks = @import("src/tokenizers/tokenizers.zig");
 const OneTokenTokenizer = @import("src/tokenizers/one_token.zig");
@@ -36,6 +37,7 @@ const ErrorType = union(enum) {
 const IngesterResult = Result(void, ErrorType);
 const IngesterError = error{
     expected_value,
+    buffer_too_small,
 } || ValueParsingError || ArgumentIterator.Error;
 
 const CommandPath = []const u8;
@@ -44,28 +46,44 @@ pub const ShortFlags = union(enum) {
     auto: void,
     disabled: void,
     using: *const ShortFlagFn,
-    map: ShortFlagMap,
+    charmap: ShortFlagMap,
 
     pub const ShortFlagMap = std.StaticStringMap(u8);
     pub const ShortFlagFn = fn ([]const u8) ?u8;
+
+    pub fn map(args: anytype) @This() {
+        var arr: [@typeInfo(@TypeOf(args)).Struct.fields.len]struct { []const u8, u8 } = undefined;
+        var i = 0;
+        inline for (@typeInfo(@TypeOf(args)).Struct.fields) |field| {
+            switch (field.type) {
+                comptime_int => {
+                    arr[i] = .{ field.name, @field(args, field.name) };
+                    i += 1;
+                },
+                else => @compileError("Invalid type for short flag map: " ++ @typeName(field.type)),
+            }
+        }
+        return .{ .charmap = ShortFlagMap.initComptime(arr[0..i]) };
+    }
 
     pub fn get(self: ShortFlags, long: []const u8) ?u8 {
         return switch (self) {
             .auto => long[0],
             .disabled => null,
             .using => |f| f(long),
-            .map => |m| m.get(long),
+            .charmap => |m| m.get(long),
         };
     }
 };
 
 const ErrorFormatterFn = fn (ErrorType, anytype) void;
 pub const ArgParserOptions = struct {
-    short_flags: ShortFlags = .auto,
+    short_flags: ShortFlags = .disabled,
     commandFieldKey: []const u8 = "command",
     error_formatter: ErrorFormatterFn = formatError,
     on_error: fn (ErrorType, ErrorFormatterFn) noreturn = onError,
     allow_extraneous_positionals: bool = false,
+    auto_help: bool = true,
 };
 
 fn formatError(err: ErrorType, writer: anytype) void {
@@ -178,8 +196,18 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                         .Error => |e| return .{ .Error = e },
                     }
                 } else {
-                    if (arg == .long or arg == .short or arg == .kv) {
-                        return .{ .Error = .{ .UnexpectedFlag = .{ .value = arg } } };
+                    if (opts.auto_help) {
+                        switch (arg) {
+                            .long => |l| if (std.mem.eql(u8, l, "help")) {
+                                try Self.printUsage();
+                                std.process.exit(0);
+                            },
+                            .short => |s| if (s == 'h') {
+                                try Self.printUsage();
+                                std.process.exit(0);
+                            },
+                            else => {},
+                        }
                     }
                     log.debug("Parsing positional argument: {s} ({d}/{d})", .{ key, 1 + positional, positionals.len });
                     if (!opts.allow_extraneous_positionals and positional >= positionals.len) {
@@ -217,10 +245,15 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
             var iter = try std.process.argsWithAllocator(alloc);
             defer iter.deinit();
             const exe = iter.next().?;
-            print(stderr, "Usage: {s} [options]\n", .{std.fs.path.basename(exe)});
+            print(stderr, "Usage: {s}", .{std.fs.path.basename(exe)});
+            var split = std.mem.splitScalar(u8, path, '.');
+            while (split.next()) |c| {
+                print(stderr, " {s}", .{c});
+            }
+            print(stderr, " [options]\n", .{});
             print(stderr, "Options:\n", .{});
             inline for (tpe_info.Struct.fields) |field| {
-                if (MakeOptionConfig.ofField(field)) |o| {
+                if (MakeOptionConfig.ofField(field, opts)) |o| {
                     print(stderr, "  ", .{});
                     if (o.required) {
                         print(stderr, "!", .{});
@@ -243,178 +276,104 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
                     print(stderr, "\n", .{});
                 }
             }
-        }
-
-        fn accumulate(comptime T: type) ?fn (T, ?T) T {
-            switch (@typeInfo(T)) {
-                .Int, .Float => return struct {
-                    pub fn accumulate(a: T, b: ?T) T {
-                        return a + (if (b) |v| v else 1);
+            if (opts.auto_help) {
+                print(stderr, "  --help, -h\tPrint this help message\n", .{});
+            }
+            var hasPrintedCommands = false;
+            inline for (tpe_info.Struct.fields) |field| {
+                if (std.mem.eql(u8, field.name, commandFieldKey)) {
+                    if (utils.typing.isUnion(field.type)) |u| {
+                        if (!hasPrintedCommands) {
+                            print(stderr, "Commands:\n", .{});
+                            hasPrintedCommands = true;
+                        }
+                        inline for (u.@"union".fields) |f| {
+                            print(stderr, "  {s}\n", .{f.name});
+                        }
                     }
-                }.accumulate,
-                .Bool => return struct {
-                    pub fn accumulate(a: T, b: ?T) T {
-                        return a or (if (b) |v| v else true);
-                    }
-                }.accumulate,
-
-                else => return null,
+                }
             }
         }
 
         const IngesterFn = fn (iter: *ArgumentIterator, args: *tks.StructFieldTracker(A), arg: ArgumentIterator.Arg) IngesterError!IngesterResult;
-
-        const ArgsMapValue = struct { ingester: *const IngesterFn };
-        const ArgsMap = std.StaticStringMap(*const ArgsMapValue);
+        const ArgsMapValue = struct { ingester: *const IngesterFn, field_index: usize };
         const ArgsMapInitKV = struct { []const u8, *const ArgsMapValue };
 
-        fn Ingester(comptime field: std.builtin.Type.StructField) type {
-            const l = plog(std.fmt.comptimePrint("[{s}:{s}:ingester]", .{ path, field.name }));
-            return struct {
-                pub const T = field.type;
-
-                pub fn miam(iter: *ArgumentIterator, out: *tks.StructFieldTracker(A), arg: ArgumentIterator.Arg) IngesterError!IngesterResult {
-                    switch (utils.typing.getTyping(T).type) {
-                        .Literal => |lit| {
-                            const parser = defaultParse(T) orelse @compileError("Unsupported type");
-                            l.debug("Parsing primitive type: {s}", .{arg});
-                            const v = switch (lit) {
-                                .Int, .Float => switch (arg) {
-                                    .kv => |kv| try parser(kv.value),
-                                    else => try parser((try iter.next() orelse return error.expected_value).asStr()),
-                                },
-                                .Bool => switch (arg) {
-                                    .kv => |kv| try parser(kv.value),
-                                    else => true,
-                                },
-                                .String => switch (arg) {
-                                    .kv => |kv| kv.value,
-                                    else => if (try iter.next()) |n| n.asStr() else return IngesterError.expected_value,
-                                },
-                            };
-                            l.debug("Set field {s} to {any}", .{ field.name, v });
-                            out.set(field.name, v);
-                        },
-                        .Complex => {
-                            const parseFn = parseFnOf(T);
-                            if (comptime MakeOptionConfig.maybeOf(T)) |o| {
-                                l.debug("Found option: {} at field {s}", .{ arg, field.name });
-                                if (o.cumulative) {
-                                    const isSet = out.isSet(field.name);
-                                    const curr = switch (@typeInfo(ValueType(T))) {
-                                        .Int => if (isSet)
-                                            out.get(field.name).value
-                                        else
-                                            0,
-                                        .Bool => if (isSet)
-                                            out.get(field.name).value
-                                        else
-                                            false,
-                                        else => @compileError("Unsupported type"),
-                                    };
-
-                                    if (accumulate(ValueType(T))) |acc| {
-                                        const res = acc(curr, null);
-                                        out.set(field.name, T{ .value = res });
-                                    } else {
-                                        @compileError("Type does not support accumulation");
-                                    }
-                                } else {
-                                    const next: []const u8 = switch (arg) {
-                                        .kv => |kv| kv.value,
-                                        else => blk: {
-                                            l.debug("Expecting value for option {s}", .{arg});
-                                            if (try iter.next()) |n| {
-                                                l.debug("Got value: {s}", .{n.asStr()});
-                                                break :blk n.asStr();
-                                            } else {
-                                                return IngesterError.expected_value;
-                                            }
-                                        },
-                                    };
-                                    const value = try parseFn(next);
-
-                                    out.set(field.name, value);
-
-                                    l.debug("Set option {s} to {}", .{ o.name(), value });
-                                }
-                            } else {
-                                @compileError("Invalid flag, it must either be a primitive type or a field of type Flag(...)");
-                            }
-                        },
-                        .Unsupported => @compileError("Unsupported type"),
-                    }
-                    return .Success;
-                }
-            };
-        }
-
-        const argsMap = blk: {
+        const argsMap: std.StaticStringMap(*const ArgsMapValue) = blk: {
             var array: [maxArgsMapSize(A)]ArgsMapInitKV = undefined;
-            var i = 0;
+            var cnt = 0;
 
-            for (tpe_info.Struct.fields) |field| {
-                if (std.mem.eql(u8, commandFieldKey, field.name)) {
-                    if (utils.typing.asOptionalUnion(field.type)) |u| {
+            for (tpe_info.Struct.fields, 0..) |field, j| {
+                if (std.mem.eql(u8, field.name, commandFieldKey)) {
+                    if (utils.typing.isUnion(field.type)) |u| {
                         for (u.@"union".fields) |f| {
-                            const value = &ArgsMapValue{ .ingester = &CommandHandler(u, f.name).miam };
+                            const value = &ArgsMapValue{
+                                .ingester = &CommandHandler(u, f.name).miam,
+                                .field_index = 0,
+                            };
 
-                            array[i] = .{ f.name, value };
-                            i += 1;
-                        }
-                        continue;
-                    }
-                }
-                if (utils.typing.AsSliceOfOpt(field.type, u8)) |_| {
-                    array[i] = .{ field.name, &ArgsMapValue{ .ingester = &Ingester(field).miam } };
-                    i += 1;
-                    continue;
-                }
-                if (isComplexType(field.type)) {
-                    const maybeOpts = MakeOptionConfig.maybeOf(field.type);
-                    const value = &ArgsMapValue{ .ingester = &Ingester(field).miam };
-
-                    if (maybeOpts) |o| {
-                        if (o.long) |long| {
-                            array[i] = .{ long, value };
-                            i += 1;
-                        }
-                        if (o.short) |short| {
-                            array[i] = .{ &[_]u8{short}, value };
-                            i += 1;
+                            array[cnt] = .{ f.name, value };
+                            cnt += 1;
                         }
                         continue;
                     } else {
-                        @compileError("Type " ++ @typeName(field.type) ++ " does not have a parse function");
+                        @compileError("Field " ++ @typeName(A) ++ "." ++ field.name ++ " is not a union");
                     }
                 }
-                switch (@typeInfo(field.type)) {
-                    .Float, .Int, .Bool => {
-                        const value = &ArgsMapValue{ .ingester = &Ingester(field).miam };
-                        array[i] = .{ field.name, value };
-                        i += 1;
-                        if (options.short_flags.get(field.name)) |short| {
-                            array[i] = .{ &[_]u8{short}, value };
-                            i += 1;
+                const value = &ArgsMapValue{
+                    .ingester = &Ingester(A, field).miam,
+                    .field_index = j,
+                };
+
+                const typing = utils.typing.getTyping(field.type);
+                const fieldPath = if (path.len == 0) field.name else path ++ "." ++ field.name;
+                switch (typing.type) {
+                    .Literal => {
+                        array[cnt] = .{ field.name, value };
+                        cnt += 1;
+                        if (options.short_flags.get(fieldPath)) |short| {
+                            array[cnt] = .{ &[_]u8{short}, value };
+                            cnt += 1;
                         }
                     },
-                    else => continue,
+                    .Complex => {
+                        if (MakeOptionConfig.maybeOf(field.type)) |o| {
+                            if (o.long) |long| {
+                                array[cnt] = .{ long, value };
+                                cnt += 1;
+                            }
+                            if (o.short) |short| {
+                                array[cnt] = .{ &[_]u8{short}, value };
+                                cnt += 1;
+                            }
+                        } else {
+                            if (options.short_flags.get(fieldPath)) |short| {
+                                array[cnt] = .{ &[_]u8{short}, value };
+                                cnt += 1;
+                            }
+                            array[cnt] = .{ field.name, value };
+                            cnt += 1;
+                        }
+                    },
+                    .Unsupported => {
+                        @compileError("Unsupported type for field " ++ @typeName(field.type) ++ " in " ++ @typeName(A));
+                    },
                 }
             }
 
-            break :blk ArgsMap.initComptime(array[0..i]);
+            break :blk std.StaticStringMap(*const ArgsMapValue).initComptime(array[0..cnt]);
         };
 
-        fn CommandHandler(comptime U: utils.typing.OptionUnion, comptime command: []const u8) type {
-            return struct {
-                pub const T = U.tpe;
+        fn CommandHandler(comptime un: utils.typing.OptionUnion, comptime command: []const u8) type {
+            const T = un.tpe;
 
+            return struct {
                 const l = plog(std.fmt.comptimePrint("[{s}:commands]", .{path}));
                 pub fn miam(iter: *ArgumentIterator, out: *tks.StructFieldTracker(A), _: ArgumentIterator.Arg) IngesterError!IngesterResult {
                     const Payload: type = std.meta.TagPayloadByName(T, command);
 
                     l.debug("CommandHandler: {s}", .{command});
-                    const Parser = CommandParserInternal(Payload, opts, path ++ command);
+                    const Parser = CommandParserInternal(Payload, opts, if (path.len == 0) command else path ++ "." ++ command);
                     const res = try Parser.parseFrom(iter);
                     switch (res) {
                         .Success => |r| {
@@ -429,14 +388,104 @@ fn CommandParserInternal(comptime A: type, comptime opts: ArgParserOptions, comp
     };
 }
 
+fn Ingester(comptime A: type, comptime field: std.builtin.Type.StructField) type {
+    const T = field.type;
+
+    return struct {
+        pub fn miam(iter: *ArgumentIterator, out: *tks.StructFieldTracker(A), arg: ArgumentIterator.Arg) IngesterError!IngesterResult {
+            const l = plog(std.fmt.comptimePrint("[Ingester:{s}]", .{field.name}));
+
+            switch (comptime utils.typing.getTyping(T).type) {
+                .Literal => |lit| {
+                    l.debug("Parsing primitive type: {s}", .{arg});
+
+                    switch (lit) {
+                        .Int, .Float => {
+                            const parser = defaultParse(T) orelse @compileError("Unsupported type for field " ++ @typeName(T) ++ " in " ++ @typeName(A));
+                            const v = switch (arg) {
+                                .kv => |kv| try parser(kv.value),
+                                else => try parser((try iter.next() orelse return error.expected_value).asStr()),
+                            };
+                            l.debug("Set field {s} to {any}", .{ field.name, v });
+                            out.set(field.name, v);
+                        },
+                        .Bool => {
+                            const parser = defaultParse(T) orelse @compileError("Unsupported type for field " ++ @typeName(T) ++ " in " ++ @typeName(A));
+                            const v = switch (arg) {
+                                .kv => |kv| try parser(kv.value),
+                                else => true,
+                            };
+                            l.debug("Set field {s} to {any}", .{ field.name, v });
+                            out.set(field.name, v);
+                        },
+                        .Slice => {
+                            const v = switch (arg) {
+                                .kv => |kv| kv.value,
+                                else => if (try iter.next()) |n| n.asStr() else return IngesterError.expected_value,
+                            };
+                            l.debug("Set field {s} to {any}", .{ field.name, v });
+                            out.set(field.name, v);
+                        },
+                        .Array => |info| {
+                            const v = switch (arg) {
+                                .kv => |kv| kv.value,
+                                else => if (try iter.next()) |n| n.asStr() else return IngesterError.expected_value,
+                            };
+                            if (v.len > info.size) {
+                                return IngesterError.buffer_too_small;
+                            }
+                            l.debug("Set field {s} to {any}", .{ field.name, v });
+                            out.setArray(field.name, v);
+                        },
+                    }
+                },
+                .Complex => {
+                    const parseFn = parseFnOf(T);
+                    const o = comptime MakeOptionConfig.maybeOf(T) orelse MakeOptionConfig.default;
+                    l.debug("Found option: {} at field {s}", .{ arg, field.name });
+                    const next: []const u8 = switch (arg) {
+                        .kv => |kv| kv.value,
+                        else => blk: {
+                            l.debug("Expecting value for option {s}", .{arg});
+                            if (try iter.next()) |n| {
+                                l.debug("Got value: {s}", .{n.asStr()});
+                                break :blk n.asStr();
+                            } else {
+                                return IngesterError.expected_value;
+                            }
+                        },
+                    };
+                    const value = try parseFn(next);
+
+                    out.set(field.name, value);
+
+                    l.debug("Set option {s} to {}", .{ o.name(), value });
+                },
+                .Unsupported => @compileError("Unsupported type"),
+            }
+            return .Success;
+        }
+    };
+}
+
+fn accumulate(comptime A: type, comptime field_name: []const u8, comptime T: type, s: *tks.StructFieldTracker(A)) void {
+    switch (@typeInfo(T)) {
+        .Int => if (s.isSet(field_name)) {
+            s.set(field_name, s.get(field_name) + 1);
+        } else {
+            s.set(field_name, 1);
+        },
+        .Bool => s.set(field_name, true),
+
+        else => @compileError("accumulate: unsupported type " ++ @typeName(T)),
+    }
+}
+
 fn maxArgsMapSize(comptime T: type) usize {
     var size = 0;
-    const tpe_info = @typeInfo(T);
-    for (tpe_info.Struct.fields) |field| {
-        if (utils.typing.asOptionalUnion(field.type)) |u| {
-            for (u.@"union".fields) |_| {
-                size += 1;
-            }
+    for (@typeInfo(T).Struct.fields) |field| {
+        if (utils.typing.isUnion(field.type)) |u| {
+            size += u.@"union".fields.len;
         } else {
             size += 2;
         }
@@ -461,9 +510,7 @@ fn ValueType(comptime T: type) type {
 fn ParseFn(comptime T: type) type {
     return fn (value: []const u8) ValueParsingError!T;
 }
-fn TypeOfParseFnOf(comptime T: type) type {
-    return ParseFn(ValueType(T));
-}
+
 fn parseFnOf(comptime T: type) ParseFn(T) {
     if (@hasDecl(T, "parse")) {
         const parseFn = @field(T, "parse");
@@ -532,18 +579,6 @@ fn defaultParse(comptime T: type) ?ParseFn(T) {
                 } else error.invalid_bool;
             }
         }.parse,
-        .Pointer => |pi| switch (pi.size) {
-            .One => defaultParse(pi.child),
-            .Slice => if (pi.child == u8)
-                struct {
-                    pub fn parse(s: []const u8) !T {
-                        return s;
-                    }
-                }.parse
-            else
-                return null,
-            else => return null,
-        },
         .Optional => |o| defaultParse(o.child),
         else => null,
     };
@@ -684,6 +719,14 @@ const MakeOptionConfig = struct {
 
     const Tokenizer = OneTokenTokenizer;
 
+    pub const default = MakeOptionConfig{
+        .long = null,
+        .short = null,
+        .description = null,
+        .cumulative = false,
+        .default = null,
+    };
+
     pub fn name(self: MakeOptionConfig) []const u8 {
         return if (self.long) |l| l else &[_]u8{self.short.?};
     }
@@ -765,54 +808,36 @@ const MakeOptionConfig = struct {
     pub const optsOptionsFieldName = "options";
 
     pub fn maybeOf(comptime T: type) ?MakeOptionConfig {
-        if (isComplexType(T)) {
-            if (@hasDecl(T, optsOptionsFieldName)) {
-                const field = @field(T, optsOptionsFieldName);
-                if (@TypeOf(field) == MakeOptionConfig) {
-                    return @as(MakeOptionConfig, field);
-                }
-            } else {
-                return MakeOptionConfig{
-                    .long = null,
-                    .short = null,
-                    .description = null,
-                    .cumulative = false,
-                    .default = null,
-                };
+        if (@hasDecl(T, optsOptionsFieldName)) {
+            const field = @field(T, optsOptionsFieldName);
+            if (@TypeOf(field) == MakeOptionConfig) {
+                return @as(MakeOptionConfig, field);
             }
         }
         return null;
     }
 
-    pub fn ofField(comptime f: std.builtin.Type.StructField) ?MakeOptionConfig {
-        switch (@typeInfo(f.type)) {
-            .Struct, .Enum, .Union, .Opaque => maybeOf(f.type),
-            .Float, .Int, .Bool => {
-                return MakeOptionConfig{
-                    .long = f.name,
-                    .short = f.name[0],
-                    .description = null,
-                    .cumulative = false,
-                    .default = std.fmt.comptimePrint("{any}", .{if (f.default_value) |d| @as(*const f.type, @ptrCast(@alignCast(d))).* else null}),
-                };
+    pub fn ofField(comptime f: std.builtin.Type.StructField, comptime opts: ArgParserOptions) ?MakeOptionConfig {
+        const typing = utils.typing.getTyping(f.type);
+        return switch (typing.type) {
+            .Complex => maybeOf(f.type),
+            .Literal => MakeOptionConfig{
+                .long = f.name,
+                .short = opts.short_flags.get(f.name),
+                .description = null,
+                .cumulative = false,
+                .default = if (f.default_value) |d| std.fmt.comptimePrint(typing.fmt(), .{@as(*const f.type, @ptrCast(@alignCast(d))).*}) else null,
             },
-            else => {},
-        }
-        return null;
+            .Unsupported => null,
+        };
     }
 };
 
-pub fn isComplexType(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Struct, .Union, .Opaque, .Enum => true,
-        else => false,
-    };
+fn isComplexType(comptime T: type) bool {
+    return utils.typing.getTyping(T).type == .Complex;
 }
-pub fn isLiteralType(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Int, .Float, .Bool => true,
-        else => false,
-    };
+fn isLiteralType(comptime T: type) bool {
+    return utils.typing.getTyping(T).type == .Literal;
 }
 
 const o1 = "{h,help}[Print help message]+=false";

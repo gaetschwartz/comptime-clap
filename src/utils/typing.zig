@@ -1,33 +1,58 @@
 const std = @import("std");
 
-pub fn Typing(comptime T: type) type {
-    return struct {
-        type: union(enum) {
-            Literal: union(enum) { Int, Float, Bool, String: fn (T) []const u8 },
-            Complex: enum { Struct, Enum, Union, Opaque },
-            Unsupported,
+pub const Typing = struct {
+    type: union(enum) {
+        Literal: union(enum) {
+            Int,
+            Float,
+            Bool,
+            Slice,
+            Array: struct { size: usize },
         },
-        optional: usize = 0,
-    };
-}
-pub fn getTyping(comptime T: type) Typing(T) {
-    if (AsSliceOfOpt(T, u8)) |f| {
-        return .{ .type = .{ .Literal = .{ .String = f } } };
+        Complex: union(enum) { Struct: type },
+        Unsupported,
+    },
+    optional: usize = 0,
+
+    pub fn fmt(self: Typing) []const u8 {
+        return switch (self.type) {
+            .Literal => |l| switch (l) {
+                .Int => "{}",
+                .Float => "{d:.2}",
+                .Bool => "{}",
+                .Slice => "\"{s}\"",
+                .Array => "\"{s}\"",
+            },
+            .Complex => |c| switch (c) {
+                .Struct => "{}",
+            },
+            .Unsupported => "{}",
+        };
     }
+};
+
+pub fn getTyping(comptime T: type) Typing {
     return switch (@typeInfo(T)) {
         .Bool => .{ .type = .{ .Literal = .Bool } },
         .Int => .{ .type = .{ .Literal = .Int } },
         .Float => .{ .type = .{ .Literal = .Float } },
-        .Pointer => |ptr| getTyping(ptr.child),
+        .Pointer => |ptrInfo| switch (ptrInfo.size) {
+            .Slice => if (ptrInfo.child == u8 and ptrInfo.is_const) .{ .type = .{ .Literal = .Slice } } else .{ .type = .Unsupported },
+            .One, .C, .Many => .{ .type = .Unsupported },
+        },
         .Optional => |opt| blk: {
             const inner = getTyping(opt.child);
             break :blk .{ .type = inner.type, .optional = 1 + inner.optional };
         },
-        .Struct => .{ .type = .{ .Complex = .Struct } },
-        .Enum => .{ .type = .{ .Complex = .Enum } },
-        .Union => .{ .type = .{ .Complex = .Union } },
-        .Opaque => .{ .type = .{ .Complex = .Opaque } },
-        .NoReturn, .Array, .ComptimeFloat, .ComptimeInt, .Undefined, .Null, .ErrorUnion, .ErrorSet, .Fn, .Frame, .AnyFrame, .Vector, .EnumLiteral, .Type, .Void => .{ .type = .Unsupported },
+        .Struct => .{ .type = .{ .Complex = .{ .Struct = T } } },
+        // .Enum => .{ .type = .{ .Complex = .Enum } },
+        // .Union => .{ .type = .{ .Complex = .Union } },
+        // .Opaque => .{ .type = .{ .Complex = .Opaque } },
+        .Array => |arrInfo| if (arrInfo.child == u8)
+            if (arrInfo.sentinel == null) .{ .type = .{ .Literal = .{ .Array = .{ .size = arrInfo.len } } } } else @compileError("Arrays with sentinel are not supported")
+        else
+            .{ .type = .Unsupported },
+        else => .{ .type = .Unsupported },
     };
 }
 
@@ -52,13 +77,14 @@ fn canTupleBeAnArray(
     }
 }
 
-pub const OptionUnion = struct { tpe: type, @"union": std.builtin.Type.Union };
-pub fn asOptionalUnion(comptime T: type) ?OptionUnion {
+pub const OptionUnion = struct { tpe: type, @"union": std.builtin.Type.Union, optional: bool = false };
+pub fn isUnion(comptime T: type) ?OptionUnion {
     return switch (@typeInfo(T)) {
         .Optional => |o| switch (@typeInfo(o.child)) {
-            .Union => |u| .{ .tpe = o.child, .@"union" = u },
+            .Union => |u| .{ .tpe = o.child, .@"union" = u, .optional = true },
             else => null,
         },
+        .Union => |u| .{ .tpe = T, .@"union" = u },
         else => null,
     };
 }

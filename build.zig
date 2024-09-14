@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     const clap_mod = b.addModule(MOD_NAME, .{ .root_source_file = b.path(MODE_ENTRY_FILE) });
 
     const test_step = b.step("test", "Run all tests in all modes.");
+
     const tests = b.addTest(.{
         .root_source_file = b.path(MODE_ENTRY_FILE),
         .target = target,
@@ -24,6 +25,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     const example_step = b.step("examples", "Build examples");
+    const check_step = b.step("check", "Build all examples without installing them");
     inline for ([_][]const u8{
         "simple-ex",
         "complex",
@@ -38,6 +40,9 @@ pub fn build(b: *std.Build) void {
         example.root_module.addImport(MOD_NAME, clap_mod);
         example_step.dependOn(&example.step);
         example_step.dependOn(&install_example.step);
+
+        check_step.dependOn(&example.step);
+
         const run_step = b.step("run-" ++ example_name, "Run the " ++ example_name ++ " example");
         const run_example = b.addRunArtifact(example);
         if (b.args) |args| {
@@ -50,5 +55,5 @@ pub fn build(b: *std.Build) void {
     all_step.dependOn(test_step);
     all_step.dependOn(example_step);
 
-    b.default_step.dependOn(all_step);
+    b.default_step.dependOn(example_step);
 }

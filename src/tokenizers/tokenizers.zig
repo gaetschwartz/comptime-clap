@@ -485,8 +485,8 @@ pub fn StructFieldTracker(comptime T: type) type {
         const Set = std.bit_set.ArrayBitSet(usize, std.meta.fields(T).len);
         const names = fieldNames(T);
 
-        fn fieldIndex(comptime field_name: []const u8) ?comptime_int {
-            return map.get(field_name);
+        fn fieldIndex(comptime field_name: []const u8) comptime_int {
+            return map.get(field_name) orelse utils.debugCompileError("field '" ++ field_name ++ "' not found in " ++ @typeName(T));
         }
 
         pub fn initValue(value: anytype) Self {
@@ -509,8 +509,23 @@ pub fn StructFieldTracker(comptime T: type) type {
 
         pub fn set(self: *Self, comptime field_name: []const u8, value: anytype) void {
             @field(self.inner, field_name) = value;
-            const index = fieldIndex(field_name) orelse @compileError("field '" ++ field_name ++ "' not found");
+            const index = fieldIndex(field_name);
             self.missing.unset(index);
+        }
+
+        pub fn setArray(self: *Self, comptime field_name: []const u8, value: anytype) void {
+            @memcpy(@field(self.inner, field_name)[0..value.len], value);
+            const index = fieldIndex(field_name);
+            self.missing.unset(index);
+        }
+
+        pub const FieldGetError = error{FieldNotSet};
+
+        pub fn tryGet(self: *Self, comptime field_name: []const u8) FieldGetError!@TypeOf(@field(self.inner, field_name)) {
+            if (self.isMissing(field_name)) {
+                return FieldGetError.FieldNotSet;
+            }
+            return @field(self.inner, field_name);
         }
 
         pub fn get(self: *Self, comptime field_name: []const u8) @TypeOf(@field(self.inner, field_name)) {
@@ -518,11 +533,11 @@ pub fn StructFieldTracker(comptime T: type) type {
         }
 
         pub fn isSet(self: *Self, comptime field_name: []const u8) bool {
-            return !self.isUnset(field_name);
+            return !self.isMissing(field_name);
         }
 
-        pub fn isUnset(self: *Self, comptime field_name: []const u8) bool {
-            const index = fieldIndex(field_name) orelse @compileError("field '" ++ field_name ++ "' not found");
+        pub fn isMissing(self: *Self, comptime field_name: []const u8) bool {
+            const index = fieldIndex(field_name);
             return self.missing.isSet(index);
         }
 
@@ -582,7 +597,7 @@ test "StructFieldTracker checkAllSetOrSetDefault" {
     tracker.set("x", 12);
     try testing.expectEqual(12, tracker.get("x"));
     try testing.expect(tracker.isSet("x"));
-    try testing.expect(tracker.isUnset("y"));
+    try testing.expect(tracker.isMissing("y"));
     try testing.expectEqual(42, tracker.get("y"));
 
     switch (tracker.checkAllSetOrSetDefault()) {

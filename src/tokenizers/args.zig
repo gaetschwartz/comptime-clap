@@ -8,7 +8,7 @@ pub const ArgumentIteratorOpts = struct {
 pub const ArgumentIteratorArg = union(enum) {
     kv: KV,
     long: []const u8,
-    short: []const u8,
+    short: u8,
     value: []const u8,
 
     pub const KV = struct {
@@ -20,7 +20,7 @@ pub const ArgumentIteratorArg = union(enum) {
         return switch (self) {
             .kv => self.kv.key,
             .long => self.long,
-            .short => self.short,
+            .short => &[_]u8{self.short},
             .value => self.value,
         };
     }
@@ -29,7 +29,7 @@ pub const ArgumentIteratorArg = union(enum) {
         switch (self) {
             .kv => try writer.print("Arg{{kv:{s}={s}}}", .{ self.kv.key, self.kv.value }),
             .long => try writer.print("Arg{{long:{s}}}", .{self.long}),
-            .short => try writer.print("Arg{{short:{s}}}", .{self.short}),
+            .short => try writer.print("Arg{{short:{c}}}", .{self.short}),
             .value => try writer.print("Arg{{value:{s}}}", .{self.value}),
         }
     }
@@ -46,7 +46,7 @@ pub const ArgumentIteratorArg = union(enum) {
                 switch (v.data) {
                     .kv => |kv| try writer.print("{s}={s}", .{ kv.key, kv.value }),
                     .long => |e| try writer.print("--{s}", .{e}),
-                    .short => |e| try writer.print("-{s}", .{e}),
+                    .short => |e| try writer.print("-{c}", .{e}),
                     .value => |e| try writer.print("{s}", .{e}),
                 }
                 if (opts.surround) |s| try writer.writeByte(s);
@@ -68,7 +68,7 @@ pub const ArgumentIteratorArg = union(enum) {
                 else => false,
             },
             .short => switch (b) {
-                .short => std.mem.eql(u8, a.short, b.short),
+                .short => a.short == b.short,
                 else => false,
             },
             .value => switch (b) {
@@ -189,7 +189,7 @@ pub fn ArgumentIterator(opts: ArgumentIteratorOpts) type {
                 return try kv(key, value);
             } else {
                 self.j += 1;
-                return .{ .short = flag[0..1] };
+                return .{ .short = flag[0] };
             }
         }
 

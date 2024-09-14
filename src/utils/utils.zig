@@ -2,8 +2,22 @@ pub const ansi = @import("ansi.zig");
 pub const testing = @import("testing.zig");
 pub const fs = @import("fs.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const typing = @import("typing.zig");
+
+// This is essentially @compileError, but the message is only use in debug mode.
+// In release mode, the message is replaced with a generic message.
+// This allows for more informative error messages in debug mode, while hopefully
+// improving the compile time in release mode by reducing the number of unique
+// error messages.
+pub inline fn debugCompileError(comptime msg: []const u8) noreturn {
+    if (builtin.mode == .Debug) {
+        @compileError(msg);
+    } else {
+        @compileError("Compile error");
+    }
+}
 
 pub fn prefixed_log(comptime prefix: []const u8) type {
     return struct {
@@ -135,4 +149,15 @@ pub fn Result(comptime T: type, comptime E: type) type {
             }
         };
     };
+}
+
+pub fn maxFieldLength(comptime T: type) usize {
+    var max = 0;
+    inline for (std.meta.fields(T)) |field| {
+        const len = field.name.len;
+        if (len > max) {
+            max = len;
+        }
+    }
+    return max;
 }
